@@ -54,6 +54,9 @@ addopts = ["--cov-report=html"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:coroutine.*was never awaited:RuntimeWarning",
+]
 
 [tool.ruff]
 line-length = 100
