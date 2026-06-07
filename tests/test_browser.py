@@ -2,7 +2,8 @@ import pytest
 import pytest_asyncio
 from jsrun import JavaScriptError
 
-from htmxclient.browser import Browser, build_browser
+from htmxclient.browser import Browser, Element
+from htmxclient.runtime import build_runtime
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -11,7 +12,7 @@ from htmxclient.browser import Browser, build_browser
 
 @pytest_asyncio.fixture(scope="module")
 async def browser(browser_snapshot):
-    r = await build_browser("http://app.example.com/", snapshot=browser_snapshot)
+    r = await build_runtime("http://app.example.com/", snapshot=browser_snapshot)
     b = Browser(r)
     try:
         yield b
@@ -347,7 +348,7 @@ async def test_clearinterval_stops_firing(runtime):
 
 
 # ---------------------------------------------------------------------------
-# Browser.load — sets HTML and initialises htmx on the content
+# Browser.load
 # ---------------------------------------------------------------------------
 
 
@@ -366,13 +367,62 @@ async def test_load_replaces_body(browser):
 
 
 # ---------------------------------------------------------------------------
-# Browser.query
+# Browser.find / Element queries
 # ---------------------------------------------------------------------------
 
 
-async def test_query_inner_html(browser):
-    await browser.load("<ul><li>a</li><li>b</li></ul>")
-    assert "<li>a</li>" in browser.query("ul")
+async def test_find_returns_element(browser):
+    await browser.load("<p id='msg'>hello</p>")
+    el = browser.find("#msg")
+    assert isinstance(el, Element)
+    assert el.innerHTML() == "hello"
+
+
+async def test_find_returns_none_for_missing(browser):
+    await browser.load("<p>hi</p>")
+    assert browser.find("#does-not-exist") is None
+
+
+async def test_element_text(browser):
+    await browser.load("<div id='d'><span>inner</span> text</div>")
+    el = browser.find("#d")
+    assert el.text() == "inner text"
+
+
+async def test_element_attr(browser):
+    await browser.load("<a id='link' href='/path' data-x='42'>link</a>")
+    el = browser.find("#link")
+    assert el.attr("href") == "/path"
+    assert el.attr("data-x") == "42"
+    assert el.attr("missing") is None
+
+
+async def test_element_fill(browser):
+    await browser.load("<input id='inp' value='old'>")
+    el = browser.find("#inp")
+    el.fill("new")
+    assert browser.runtime.eval("document.querySelector('#inp').value") == "new"
+
+
+async def test_element_fill_textarea(browser):
+    await browser.load("<textarea id='ta'>old</textarea>")
+    el = browser.find("#ta")
+    el.fill("new")
+    assert browser.runtime.eval("document.querySelector('#ta').value") == "new"
+
+
+async def test_find_all_returns_elements(browser):
+    await browser.load("<ul><li>a</li><li>b</li><li>c</li></ul>")
+    items = browser.find_all("li")
+    assert len(items) == 3
+    assert items[0].text() == "a"
+    assert items[1].text() == "b"
+    assert items[2].text() == "c"
+
+
+async def test_find_all_empty(browser):
+    await browser.load("<div>no items</div>")
+    assert browser.find_all("li") == []
 
 
 async def test_query_missing_element_raises(browser):
@@ -382,51 +432,85 @@ async def test_query_missing_element_raises(browser):
 
 
 # ---------------------------------------------------------------------------
-# Browser.trigger — hx-get swaps content from mocked server
+# Browser.trigger / Element.click / Element.dispatch_event
 # ---------------------------------------------------------------------------
 
 
-async def test_trigger_hx_get(browser, httpx_mock):
+async def test_element_click_hx_get(browser, httpx_mock):
     httpx_mock.add_response(
-        url="http://app.example.com/fragment",
-        text="<span>loaded</span>",
+        url="http://app.example.com/click-target",
+        text="<b>clicked</b>",
     )
     await browser.load(
-        '<div id="target">'
-        '<button hx-get="/fragment" hx-target="#target" hx-swap="innerHTML">load</button>'
+        '<div id="out">'
+        '<button hx-get="/click-target" hx-target="#out" hx-swap="innerHTML">click</button>'
         "</div>"
     )
-    await browser.trigger("button")
-    assert browser.query("#target") == "<span>loaded</span>"
+    btn = browser.find("button")
+    await btn.click()
+    assert browser.query("#out") == "<b>clicked</b>"
 
 
-async def test_trigger_hx_post(browser, httpx_mock):
+async def test_element_dispatch_event_custom(browser, httpx_mock):
     httpx_mock.add_response(
-        url="http://app.example.com/submit",
-        text="<p>saved</p>",
+        url="http://app.example.com/custom",
+        text="<i>custom</i>",
     )
     await browser.load(
-        '<div id="result">'
-        '<button hx-post="/submit" hx-target="#result" hx-swap="innerHTML">save</button>'
+        '<div id="out">'
+        '<button hx-get="/custom" hx-trigger="my-event" hx-target="#out" '
+        'hx-swap="innerHTML">go</button>'
         "</div>"
     )
-    await browser.trigger("button")
-    assert browser.query("#result") == "<p>saved</p>"
+    btn = browser.find("button")
+    await btn.dispatch_event("my-event")
+    assert browser.query("#out") == "<i>custom</i>"
 
 
-async def test_trigger_request_sends_correct_method(browser, httpx_mock):
-    httpx_mock.add_response(url="http://app.example.com/api", text="ok")
-    await browser.load('<div id="out"><button hx-post="/api" hx-target="#out">go</button></div>')
-    await browser.trigger("button")
-    assert httpx_mock.get_request().method == "POST"
+# ---------------------------------------------------------------------------
+# Element.submit
+# ---------------------------------------------------------------------------
 
 
-async def test_trigger_url_resolves_against_base(browser, httpx_mock):
-    # hx-get="/path" should resolve to http://app.example.com/path
-    httpx_mock.add_response(url="http://app.example.com/path", text="ok")
-    await browser.load('<div id="r"><button hx-get="/path" hx-target="#r">go</button></div>')
-    await browser.trigger("button")
-    assert httpx_mock.get_request().url == "http://app.example.com/path"
+async def test_element_submit_form(browser, httpx_mock):
+    httpx_mock.add_response(
+        url="http://app.example.com/form-action",
+        text="<p>submitted</p>",
+    )
+    await browser.load(
+        '<form id="f" hx-post="/form-action" hx-target="#result" hx-swap="innerHTML">'
+        '<input name="x" value="1">'
+        '<button type="submit" id="btn">send</button>'
+        "</form>"
+        '<div id="result"></div>'
+    )
+    btn = browser.find("#btn")
+    await btn.submit()
+    assert browser.query("#result") == "<p>submitted</p>"
+
+
+async def test_element_submit_input(browser, httpx_mock):
+    httpx_mock.add_response(
+        url="http://app.example.com/form-action",
+        text="<p>sent</p>",
+    )
+    await browser.load(
+        '<form hx-post="/form-action" hx-target="#result" hx-swap="innerHTML">'
+        '<input type="text" name="q" value="search">'
+        '<input type="submit" id="sub" value="go">'
+        "</form>"
+        '<div id="result"></div>'
+    )
+    sub = browser.find("#sub")
+    await sub.submit()
+    assert browser.query("#result") == "<p>sent</p>"
+
+
+async def test_element_submit_no_form_raises(browser):
+    await browser.load("<button id='btn'>orphan</button>")
+    btn = browser.find("#btn")
+    with pytest.raises(JavaScriptError):
+        await btn.submit()
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +520,10 @@ async def test_trigger_url_resolves_against_base(browser, httpx_mock):
 
 async def test_browser_context_manager(httpx_mock, browser_snapshot):
     httpx_mock.add_response(url="http://app.example.com/hi", text="<b>hi</b>")
-    r = await build_browser("http://app.example.com/", snapshot=browser_snapshot)
+    r = await build_runtime("http://app.example.com/", snapshot=browser_snapshot)
     with Browser(r) as b:
         await b.load('<div id="r"><button hx-get="/hi" hx-target="#r">go</button></div>')
-        await b.trigger("button")
+        btn = b.find("button")
+        assert btn is not None
+        await btn.click()
         assert b.query("#r") == "<b>hi</b>"
