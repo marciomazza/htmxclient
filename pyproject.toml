@@ -61,6 +61,9 @@ asyncio_mode = "auto"
 filterwarnings = [
     "ignore:coroutine.*was never awaited:RuntimeWarning",
 ]
+markers = [
+    "hypo: mark a test as a hypothesis-based crosscheck test",
+]
 
 [tool.ruff]
 line-length = 100
