@@ -19,7 +19,9 @@ _HX_PREFIX = "hx-"
 
 _SETTLE_INIT_SCRIPT = """\
 window.__htmxSettled = false;
-document.addEventListener("htmx:afterSettle", () => { window.__htmxSettled = true; });
+window.__htmxWillRequest = false;
+document.addEventListener("htmx:after:settle", () => { window.__htmxSettled = true; });
+document.addEventListener("htmx:before:request", () => { window.__htmxWillRequest = true; });
 """
 
 _JS_SERIALIZE = """\
@@ -27,7 +29,6 @@ _JS_SERIALIZE = """\
     // Use prototype getters to avoid shadowing by named form controls (e.g. name="tagName").
     const _tagName = Object.getOwnPropertyDescriptor(Element.prototype, 'tagName').get;
     const _nodeType = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeType').get;
-    const _textContent = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').get;
     const _childNodes = Object.getOwnPropertyDescriptor(Node.prototype, 'childNodes').get;
     const _attributes = Object.getOwnPropertyDescriptor(Element.prototype, 'attributes').get;
     const _getAttribute = Element.prototype.getAttribute;
@@ -36,16 +37,19 @@ _JS_SERIALIZE = """\
     const _checked = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').get;
     const _textareaValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').get;
     const _selectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').get;
-    const _optionSelected = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected').get;
+    const _optionSelected = Object.getOwnPropertyDescriptor(window.HTMLOptionElement.prototype, 'selected').get;
 
     function serializeNode(node) {
         const nodeType = _nodeType.call(node);
         if (nodeType === Node.TEXT_NODE) {
-            const data = _textContent.call(node).trim();
+            // node.data is the reliable property for text nodes in both happy-dom and real browsers;
+            // Node.prototype.textContent getter returns '' for Text nodes in happy-dom.
+            const data = node.data.trim();
             return data ? {type: "text", data} : null;
         }
         if (nodeType !== Node.ELEMENT_NODE) return null;
         const tag = _tagName.call(node).toLowerCase();
+        if (tag === "script") return null;
         const attrList = _attributes.call(node);
         const attrNames = [...attrList].map(a => a.name).sort();
         const attrs = {};
@@ -128,6 +132,19 @@ class Talk:
         self.request = self.response = None
 
 
+class _AsyncByteStream(httpx.AsyncByteStream):
+    """Wraps a bytes body as an AsyncByteStream (required by httpx.AsyncClient)."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def __aiter__(self):
+        yield self._data
+
+    async def aclose(self) -> None:
+        pass
+
+
 class _AsyncWSGITransport(httpx.AsyncBaseTransport):
     """Runs a sync WSGI app as an async httpx transport via a thread executor."""
 
@@ -135,8 +152,16 @@ class _AsyncWSGITransport(httpx.AsyncBaseTransport):
         self._sync = httpx.WSGITransport(app=app)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync.handle_request, request)
+        loop = asyncio.get_running_loop()
+        sync_response = await loop.run_in_executor(None, self._sync.handle_request, request)
+        body = b"".join(sync_response.stream)
+        response = httpx.Response(
+            status_code=sync_response.status_code,
+            headers=sync_response.headers,
+            stream=_AsyncByteStream(body),
+        )
+        response._content = body  # pre-set so r.content works without await aread()
+        return response
 
 
 class _CapturingTransport(httpx.AsyncBaseTransport):
@@ -151,8 +176,6 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
             method=request.method, path=str(request.url), headers=dict(request.headers)
         )
         response = await self._wrapped.handle_async_request(request)
-        # httpx responses from WSGITransport may be unread; read now so headers are available
-        await response.aread()
         self._talk.response = CapturedResponse(
             status=response.status_code, headers=dict(response.headers)
         )

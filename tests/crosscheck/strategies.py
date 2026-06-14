@@ -325,7 +325,7 @@ def st_html_form(draw) -> SimpleNamespace:
     html = dedent(f"""\
         <form id='focus' {method}='/fragment' {_attrs_str(attrs)}>
             {"\n".join(c.html for c in controls)}
-        </form>"
+        </form>
 """)
     ids_by_interaction = map_reduce(
         collapse(c.all_elements for c in controls),
